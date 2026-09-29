@@ -1,34 +1,39 @@
-import streamlit as st
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(), nn.Linear(128, 64), nn.ReLU(),
+            nn.Dropout(0.3), nn.Linear(64, num_classes),
+        )
 
-N = 512
-CLASSES = [
-    "BPSK", "QPSK", "16QAM", "64QAM",
-    "FHSS", "LFM Radar", "Barrage Jamming", "Spoofing Jamming"
-]
+    def forward(self, x):
+        return self.classifier(self.features(x))
 
-st.set_page_config(page_title="CyberHertz RF Detector", layout="wide")
-st.title("CyberHertz | RF Signal Detection")
-st.caption("Upload or generate 512 complex IQ samples")
 
-def generate_signal(kind, snr_db):
+@st.cache_resource
+def load_model():
+    # Only load the checkpoint you trained and supplied. PyTorch pickle files
+    # must never be loaded from an untrusted user upload.
+    checkpoint = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
+    classes = [str(name) for name in checkpoint["class_names"]]
+    if classes != EXPECTED_CLASSES:
+        raise ValueError(f"Unexpected class order in checkpoint: {classes}")
+    model = CNNBaseline(num_classes=len(classes))
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    model.eval()
+    return model, classes
+
+
+def generate_example(kind, snr_db):
     rng = np.random.default_rng()
     t = np.arange(N)
-
     if kind == "FHSS":
         frequencies = rng.choice([0.03, 0.08, 0.14, 0.21], size=8)
         phase = np.cumsum(2 * np.pi * np.repeat(frequencies, N // 8))
         clean = np.exp(1j * phase)
     elif kind == "LFM Radar":
         clean = np.exp(1j * 2 * np.pi * (0.02 * t + 0.00035 * t**2))
-    elif kind == "BPSK":
+    else:
         symbols = rng.choice([-1, 1], size=64)
         clean = np.repeat(symbols, 8).astype(complex)
-    else:
-        raise ValueError("Unknown example signal")
-
     signal_power = np.mean(np.abs(clean) ** 2)
     noise_power = signal_power / (10 ** (snr_db / 10))
     noise = np.sqrt(noise_power / 2) * (
@@ -36,37 +41,36 @@ def generate_signal(kind, snr_db):
     )
     return clean + noise
 
+
 def read_csv(upload):
     df = pd.read_csv(upload)
     if not {"I", "Q"}.issubset(df.columns):
-        raise ValueError("CSV must contain columns named I and Q.")
+        raise ValueError("The CSV needs columns named I and Q.")
     if len(df) != N:
-        raise ValueError(f"CSV must contain exactly {N} rows.")
+        raise ValueError(f"The CSV needs exactly {N} rows.")
     iq = df["I"].to_numpy(dtype=float) + 1j * df["Q"].to_numpy(dtype=float)
     if not np.all(np.isfinite(iq)):
-        raise ValueError("I and Q must contain only finite numbers.")
+        raise ValueError("I and Q must contain finite numbers.")
     return iq
 
-def predict_with_your_model(iq):
-    """
-    Replace this function with the SAME preprocessing and model
-    inference used in your training notebook.
 
-    Expected output: (class_name, confidence_between_0_and_1)
-    """
-    return None, None
+st.set_page_config(page_title="CyberHertz RF Detector", layout="wide")
+st.title("CyberHertz | RF Signal Detection")
+st.caption("512 complex IQ samples • CNN baseline with noise augmentation")
 
 source = st.radio("Signal source", ["Generate example", "Upload CSV"], horizontal=True)
-
+iq = None
 if source == "Generate example":
     kind = st.selectbox("Example signal", ["FHSS", "LFM Radar", "BPSK"])
     snr_db = st.slider("SNR (dB)", -18.0, 18.0, 5.0, 0.5)
-    iq = generate_signal(kind, snr_db)
-    snr_display = f"{snr_db:.1f} dB (selected)"
+    if st.button("Generate signal") or "example_iq" not in st.session_state:
+        st.session_state.example_iq = generate_example(kind, snr_db)
+        st.session_state.example_snr = snr_db
+    iq = st.session_state.example_iq
+    snr_display = f"{st.session_state.example_snr:.1f} dB (selected)"
 else:
-    upload = st.file_uploader("Upload a CSV with I and Q columns", type="csv")
-    iq = None
-    snr_display = "Unknown (not supplied)"
+    upload = st.file_uploader("Upload CSV containing I and Q columns", type="csv")
+    snr_display = "Unknown (not provided)"
     if upload is not None:
         try:
             iq = read_csv(upload)
@@ -75,7 +79,6 @@ else:
 
 if iq is not None:
     left, right = st.columns(2)
-
     with left:
         st.subheader("Time-domain waveform")
         fig, ax = plt.subplots()
@@ -85,7 +88,6 @@ if iq is not None:
         ax.legend()
         st.pyplot(fig)
         plt.close(fig)
-
     with right:
         st.subheader("FFT spectrum")
         spectrum = np.fft.fftshift(np.fft.fft(iq))
@@ -97,19 +99,30 @@ if iq is not None:
         st.pyplot(fig)
         plt.close(fig)
 
-    predicted_class, confidence = predict_with_your_model(iq)
-
-    a, b, c = st.columns(3)
-    a.metric("Predicted class", predicted_class or "Model not connected")
-    b.metric("Confidence", f"{confidence:.1%}" if confidence is not None else "—")
-    c.metric("SNR / noise condition", snr_display)
-
-    st.subheader("Detection status")
-    if predicted_class is None:
-        st.info("Signal loaded. Connect your trained model to enable detection.")
-    elif predicted_class in ["Barrage Jamming", "Spoofing Jamming"]:
-        st.error("Jamming detected")
-    elif predicted_class in ["FHSS", "LFM Radar"]:
-        st.warning("Military/CEMA signal detected")
+    if not CHECKPOINT.is_file():
+        st.warning("Add cnn_aug_seed42_best.zip to the same GitHub folder as this app.py.")
     else:
-        st.success("Standard communication signal detected")
+        try:
+            model, classes = load_model()
+            # Training notebook used float32 arrays with shape [batch, 2, 512].
+            x = np.stack((iq.real, iq.imag)).astype(np.float32)
+            with torch.inference_mode():
+                logits = model(torch.from_numpy(x).unsqueeze(0))
+                probabilities = torch.softmax(logits, dim=1)[0].numpy()
+            class_id = int(np.argmax(probabilities))
+            predicted_class = classes[class_id]
+            confidence = float(probabilities[class_id])
+
+            a, b, c = st.columns(3)
+            a.metric("Predicted class", predicted_class)
+            b.metric("Confidence", f"{confidence:.1%}")
+            c.metric("SNR / noise condition", snr_display)
+
+            st.subheader("Detection status")
+            if predicted_class in ("Barrage Jamming", "Spoofing Jamming"):
+                st.error("Jamming detected")
+            elif predicted_class in ("FHSS", "LFM Radar"):
+                st.warning("Military/CEMA signal detected")
+            else:
+                st.success("Standard communication signal detected")
+            st.caption("Confidence is the model's softmax score, not a calibrated probability. "
