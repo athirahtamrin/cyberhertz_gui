@@ -157,4 +157,4 @@ if iq is not None:
                 st.warning("Military/CEMA signal detected")
             else:
                 st.success("Standard communication signal detected")
-            st.caption("Confidence is the model's softmax score, not a calibrated probability. "
+            st.caption("Confidence is the model's softmax score, not a calibrated probability.")
