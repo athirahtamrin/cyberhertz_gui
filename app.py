@@ -157,7 +157,5 @@ if iq is not None:
                 st.warning("Military/CEMA signal detected")
             else:
                 st.success("Standard communication signal detected")
-                           else:
-                st.success("Standard communication signal detected")
         except Exception as exc:
             st.error(f"Could not load the model: {exc}")
