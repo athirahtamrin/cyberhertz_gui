@@ -94,3 +94,67 @@ source = st.radio("Signal source", ["Generate example", "Upload CSV"], horizonta
 iq = None
 if source == "Generate example":
     kind = st.selectbox("Example signal", ["FHSS", "LFM Radar", "BPSK"])
+    snr_db = st.slider("SNR (dB)", -18.0, 18.0, 5.0, 0.5)
+    if st.button("Generate signal") or "example_iq" not in st.session_state:
+        st.session_state.example_iq = generate_example(kind, snr_db)
+        st.session_state.example_snr = snr_db
+    iq = st.session_state.example_iq
+    snr_display = f"{st.session_state.example_snr:.1f} dB (selected)"
+else:
+    upload = st.file_uploader("Upload CSV containing I and Q columns", type="csv")
+    snr_display = "Unknown (not provided)"
+    if upload is not None:
+        try:
+            iq = read_csv(upload)
+        except (ValueError, TypeError) as exc:
+            st.error(str(exc))
+
+if iq is not None:
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Time-domain waveform")
+        fig, ax = plt.subplots()
+        ax.plot(iq.real, label="I", linewidth=1)
+        ax.plot(iq.imag, label="Q", linewidth=1)
+        ax.set(xlabel="Sample index", ylabel="Amplitude")
+        ax.legend()
+        st.pyplot(fig)
+        plt.close(fig)
+    with right:
+        st.subheader("FFT spectrum")
+        spectrum = np.fft.fftshift(np.fft.fft(iq))
+        frequency = np.fft.fftshift(np.fft.fftfreq(N))
+        magnitude_db = 20 * np.log10(np.maximum(np.abs(spectrum), 1e-12))
+        fig, ax = plt.subplots()
+        ax.plot(frequency, magnitude_db, linewidth=1)
+        ax.set(xlabel="Normalized frequency", ylabel="Magnitude (dB)")
+        st.pyplot(fig)
+        plt.close(fig)
+
+    if not CHECKPOINT.is_file():
+        st.warning("Add cnn_aug_seed42_best.zip to the same GitHub folder as this app.py.")
+    else:
+        try:
+            model, classes = load_model()
+            # Training notebook used float32 arrays with shape [batch, 2, 512].
+            x = np.stack((iq.real, iq.imag)).astype(np.float32)
+            with torch.inference_mode():
+                logits = model(torch.from_numpy(x).unsqueeze(0))
+                probabilities = torch.softmax(logits, dim=1)[0].numpy()
+            class_id = int(np.argmax(probabilities))
+            predicted_class = classes[class_id]
+            confidence = float(probabilities[class_id])
+
+            a, b, c = st.columns(3)
+            a.metric("Predicted class", predicted_class)
+            b.metric("Confidence", f"{confidence:.1%}")
+            c.metric("SNR / noise condition", snr_display)
+
+            st.subheader("Detection status")
+            if predicted_class in ("Barrage Jamming", "Spoofing Jamming"):
+                st.error("Jamming detected")
+            elif predicted_class in ("FHSS", "LFM Radar"):
+                st.warning("Military/CEMA signal detected")
+            else:
+                st.success("Standard communication signal detected")
+            st.caption("Confidence is the model's softmax score, not a calibrated probability. "
